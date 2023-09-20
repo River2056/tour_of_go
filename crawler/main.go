@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync"
 )
 
 type Fetcher interface {
@@ -10,27 +11,50 @@ type Fetcher interface {
 	Fetch(url string) (body string, urls []string, err error)
 }
 
+type ConcurrentMap struct {
+    Map map[string]bool
+    mu sync.Mutex
+}
+
+func (m *ConcurrentMap) Get(key string) bool {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    return m.Map[key]
+}
+
+func (m *ConcurrentMap) Set(key string, isVisited bool) {
+    m.mu.Lock()
+    m.Map[key] = isVisited
+    m.mu.Unlock()
+}
+
 // Crawl uses fetcher to recursively crawl
 // pages starting with url, to a maximum of depth.
-func Crawl(url string, depth int, fetcher Fetcher, ch chan string) {
-	// TODO: Fetch URLs in parallel.
-	// TODO: Don't fetch the same URL twice.
-	// This implementation doesn't do either:
+func Crawl(url string, depth int, fetcher Fetcher, concurrentMap *ConcurrentMap, ch chan string) {
 	defer close(ch)
 	if depth <= 0 {
 		return
 	}
+    
+    // is already visited, skip
+    if ok := concurrentMap.Get(url); ok {
+        return
+    }
+
 	body, urls, err := fetcher.Fetch(url)
+
+    // set already visited
+    concurrentMap.Set(url, true)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	ch <- fmt.Sprintf("found: %s %q\n", url, body)
+	ch <- fmt.Sprintf("found: %s %q", url, body)
 
 	result := make([]chan string, len(urls))
 	for i, u := range urls {
 		result[i] = make(chan string)
-		go Crawl(u, depth-1, fetcher, result[i])
+		go Crawl(u, depth-1, fetcher, concurrentMap, result[i])
 	}
 
 	for i := range result {
@@ -42,7 +66,8 @@ func Crawl(url string, depth int, fetcher Fetcher, ch chan string) {
 
 func main() {
 	ch := make(chan string)
-	go Crawl("https://golang.org/", 4, fetcher, ch)
+    concurrentMap := ConcurrentMap{Map: make(map[string]bool), mu: sync.Mutex{}}
+	go Crawl("https://golang.org/", 4, fetcher, &concurrentMap, ch)
 
 	for s := range ch {
 		fmt.Println(s)
